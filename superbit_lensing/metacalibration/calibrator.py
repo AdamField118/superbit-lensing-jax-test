@@ -310,7 +310,7 @@ class Calibrator:
         else:
             plt.show()  
         
-    def selection_n_calibration(self, selection_cut, cluster_redshift=None, mcal_shear=0.01, PFS_response_correction=True, R_diagonal=True, constant_Rpsf=False):
+    def selection_n_calibration(self, selection_cut, cluster_redshift=None, mcal_shear=0.01, PFS_response_correction=True, R_diagonal=True, constant_Rpsf=False, constant_C_gamma=False):
         selected_catalog, R_S, c_gamma, mean_g1, mean_g2, R_PSF = compute_R_S(
                 mcal=self.catalog,
                 qual_cuts=selection_cut,
@@ -322,8 +322,10 @@ class Calibrator:
             )
         if not constant_Rpsf:
             R_PSF = None
+        if not constant_C_gamma:
+            c_gamma = None
         resdict = self.gridder(self.config)
-        calibrate_catalog(selected_catalog, resdict, R_S, mean_g1, mean_g2, suffix=f"{self.config['n_bins']}x{self.config['n_bins']}", psf_correction=PFS_response_correction, R_PSF=R_PSF)
+        calibrate_catalog(selected_catalog, resdict, R_S, mean_g1, mean_g2, suffix=f"{self.config['n_bins']}x{self.config['n_bins']}", psf_correction=PFS_response_correction, R_PSF=R_PSF, c_gamma=c_gamma)
         self.selected_catalog = selected_catalog
         
         
@@ -414,7 +416,7 @@ def assign_weights(catalog, x_bins, y_bins, weights):
     return w_obj
 
 
-def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correction=False, R_PSF=None):
+def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correction=False, R_PSF=None, c_gamma=None):
     """
     Assign gridded weights and calibrated ellipticities to a catalog.
 
@@ -449,11 +451,16 @@ def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correcti
     r11_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R11_psf'])
     r22_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R22_psf'])
     
-    c1_col = assign_weights(catalog, x_bins, y_bins, grid['C1'])
-    c2_col = assign_weights(catalog, x_bins, y_bins, grid['C2'])
+    
+    if c_gamma is not None:
+        c1_col = c_gamma[0]
+        c2_col = c_gamma[1]
+    else:
+        c1_col = assign_weights(catalog, x_bins, y_bins, grid['C1'])
+        c2_col = assign_weights(catalog, x_bins, y_bins, grid['C2'])
 
-    g1_noshear = catalog['g_noshear'][:, 0] - c1_col #- mean_g1
-    g2_noshear = catalog['g_noshear'][:, 1] - c2_col #- mean_g2
+    g1_noshear = catalog['g_noshear'][:, 0]  #- c1_col #- mean_g1
+    g2_noshear = catalog['g_noshear'][:, 1]  #- c2_col #- mean_g2
 
     if psf_correction:
         if R_PSF is not None:
