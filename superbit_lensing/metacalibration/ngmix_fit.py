@@ -140,6 +140,18 @@ class SuperBITNgmixFitter():
         obslist = self.medsObj.get_obslist(iobj, weight_type)
         se_obslist = ngmix.ObsList(meta=deepcopy(obslist._meta))
 
+        for obs in obslist[:]:
+            se_obslist.append(obs)
+        obslist = se_obslist
+
+        return obslist
+
+
+    def _get_source_observations_dep(self, iobj, weight_type='uberseg'):
+
+        obslist = self.medsObj.get_obslist(iobj, weight_type)
+        se_obslist = ngmix.ObsList(meta=deepcopy(obslist._meta))
+
         if self.use_coadd_only:
             print('Using only coadd to do ngmix fitting')
             if not self.has_coadd:
@@ -355,7 +367,7 @@ def setup_obj(i, meds_obj):
 
     return obj
 
-def check_obj_flags(obj, min_cutouts=1):
+def check_obj_flags(obj, min_cutouts=2):
     '''
     Check if MEDS obj has any flags.
 

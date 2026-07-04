@@ -8,6 +8,14 @@ from matplotlib.ticker import LogLocator, ScalarFormatter
 from matplotlib.colors import LogNorm
 from scipy.ndimage import gaussian_filter
 
+MINIMAL_TYPES = ['noshear', '1p', '1m', '2p', '2m']
+DILATE_TYPES = ['noshear', '1p', '1m', '2p', '2m', '1p_psf', '1m_psf', '2p_psf', '2m_psf']
+
+DEFAULT_MCAL_PARS = {'psf': 'dilate', 'mcal_shear': 0.01, 'types' : DILATE_TYPES}
+AZGAUSS_MCAL_PARS = {'psf': 'azgauss', 'mcal_shear': 0.01, 'types' : MINIMAL_TYPES}
+
+_SHEAR_STEPS = ('1', '2')
+
 DEFAULT_CONFIG = {
                 # Binning
                 "n_bins": 5,              # number of bins in x and y
@@ -46,16 +54,36 @@ DEFUALT_SELECTION_CUT = {
     #'min_admom_sigma': 0.1    # Optional: require admom_sigma > 0.3
 }
 
+def mcal_response(tab, mcal_shear, suffix=''):
+    """Per-object 2x2 mcal response, R[i, j, n] for component i, shear step j,
+    object n. Pass suffix='_psf' for the PSF response."""
+    R = np.array([
+        [(tab[f'g_{step}p{suffix}'][:, i] - tab[f'g_{step}m{suffix}'][:, i]) / (2. * mcal_shear)
+         for step in _SHEAR_STEPS]
+        for i in range(2)
+    ])
+    return R
+
+
+def mcal_additive_bias(tab, suffix=''):
+    """Per-object additive bias, c[i, n] for component i. The diagonal step
+    (i -> step i+1) is used, matching the standard mcal convention."""
+    c = np.array([
+        (tab[f'g_{step}p{suffix}'][:, i] + tab[f'g_{step}m{suffix}'][:, i]) / 2.
+        - tab['g_noshear'][:, i]
+        for i, step in enumerate(_SHEAR_STEPS)
+    ])
+    return c
+
 
 class Calibrator:
     """
     Class to calibrate shear measurements using metacalibration.
     """
 
-    def __init__(self, catalog, config = DEFAULT_CONFIG, plot_outfile=None, seed=None):
+    def __init__(self, catalog, config = DEFAULT_CONFIG, plot_outfile=None, seed=None, reconv_psf='dilate'):
         
         if isinstance(catalog, str):
-            # If catalog is a string, assume it's a path to a MEDS file
             self.catalog = Table.read(catalog)
         else:
             self.catalog = catalog
@@ -63,11 +91,17 @@ class Calibrator:
         self.plot_outfile = plot_outfile
         self.seed = seed
         self.config = config
-        shear_keys = [
-            'g_noshear',
-            'g_1p', 'g_1m', 'g_2p', 'g_2m',
-            'g_1p_psf', 'g_1m_psf', 'g_2p_psf', 'g_2m_psf',
-        ]
+        self.reconv_psf = reconv_psf
+        if reconv_psf == 'dilate':
+            self.mcal_pars = DEFAULT_MCAL_PARS
+            shear_keys = [f"g_{suffix}" for suffix in DILATE_TYPES]
+            self.has_psf = True
+        elif reconv_psf == 'azgauss':
+            self.mcal_pars = AZGAUSS_MCAL_PARS
+            shear_keys = [f"g_{suffix}" for suffix in MINIMAL_TYPES]
+            self.has_psf = False
+        else:
+            raise ValueError(f"Invalid reconv_psf value: {reconv_psf}. Must be 'dilate' or 'azgauss'.")
 
         finite = np.ones(len(self.catalog), dtype=bool)
         for key in shear_keys:
@@ -76,8 +110,12 @@ class Calibrator:
         finite &= np.isfinite(self.catalog["T_noshear"] / self.catalog['Tpsf_noshear']) & np.isfinite(self.catalog["s2n_noshear"]) & (self.catalog["T_noshear"] / self.catalog['Tpsf_noshear'] > 0) & (self.catalog["s2n_noshear"] > 0)
         
         self.catalog = self.catalog[finite]
-        r_colnames = ['r11', 'r12', 'r21', 'r22', 'r11_psf', 'r12_psf', 'r21_psf', 'r22_psf']
-        c_colnames = ['c1_psf', 'c2_psf', 'c1', 'c2']
+        if self.has_psf:
+            r_colnames = ['r11', 'r12', 'r21', 'r22', 'r11_psf', 'r12_psf', 'r21_psf', 'r22_psf']
+            c_colnames = ['c1_psf', 'c2_psf', 'c1', 'c2']
+        else:
+            r_colnames = ['r11', 'r12', 'r21', 'r22']
+            c_colnames = ['c1', 'c2']
         for colname in r_colnames + c_colnames:
             if colname not in self.catalog.colnames:
                 self.compute_response()
@@ -87,34 +125,26 @@ class Calibrator:
         """
         Compute the response of the shear measurements.
         """
-        r11 = (self.catalog['g_1p'][:, 0] - self.catalog['g_1m'][:, 0]) / (2. * mcal_shear)
-        r12 = (self.catalog['g_2p'][:, 0] - self.catalog['g_2m'][:, 0]) / (2. * mcal_shear)
-        r21 = (self.catalog['g_1p'][:, 1] - self.catalog['g_1m'][:, 1]) / (2. * mcal_shear)
-        r22 = (self.catalog['g_2p'][:, 1] - self.catalog['g_2m'][:, 1]) / (2. * mcal_shear)
+        (r11, r12), (r21, r22) = mcal_response(self.catalog, mcal_shear)
+        c1_gamma, c2_gamma = mcal_additive_bias(self.catalog)
+        value_added = {
+            'r11': r11, 'r12': r12, 'r21': r21, 'r22': r22,
+            'c1': c1_gamma, 'c2': c2_gamma,
+        }
+        if self.has_psf:
+            (r11_psf, r12_psf), (r21_psf, r22_psf) = \
+                mcal_response(self.catalog, mcal_shear, suffix='_psf')
+            c1_psf, c2_psf = mcal_additive_bias(self.catalog, suffix='_psf')
+            value_added.update({
+                'r11_psf': r11_psf, 'r12_psf': r12_psf,
+                'r21_psf': r21_psf, 'r22_psf': r22_psf,
+                'c1_psf': c1_psf, 'c2_psf': c2_psf,
+            })
+            
+        self.catalog.add_columns(
+            list(value_added.values()), names=list(value_added.keys())
+        )
         
-        r11_psf = (self.catalog['g_1p_psf'][:, 0] - self.catalog['g_1m_psf'][:, 0]) / (2. * mcal_shear)
-        r12_psf = (self.catalog['g_2p_psf'][:, 0] - self.catalog['g_2m_psf'][:, 0]) / (2. * mcal_shear)
-        r21_psf = (self.catalog['g_1p_psf'][:, 1] - self.catalog['g_1m_psf'][:, 1]) / (2. * mcal_shear)
-        r22_psf = (self.catalog['g_2p_psf'][:, 1] - self.catalog['g_2m_psf'][:, 1]) / (2. * mcal_shear)
-    
-        c1_psf = ( (self.catalog['g_1p_psf'][:,0] + self.catalog['g_1m_psf'][:,0])/2 - self.catalog['g_noshear'][:,0])
-        c2_psf = ((self.catalog['g_2p_psf'][:, 1] + self.catalog['g_2m_psf'][:, 1])/2 - self.catalog['g_noshear'][:, 1])
-        c1_gamma = ((self.catalog['g_1p'][:, 0] + self.catalog['g_1m'][:, 0])/2 - self.catalog['g_noshear'][:, 0])
-        c2_gamma = ((self.catalog['g_2p'][:, 1] + self.catalog['g_2m'][:, 1])/2 - self.catalog['g_noshear'][:, 1])
-        
-        self.catalog['r11'] = r11
-        self.catalog['r12'] = r12
-        self.catalog['r21'] = r21
-        self.catalog['r22'] = r22
-        self.catalog['r11_psf'] = r11_psf
-        self.catalog['r12_psf'] = r12_psf
-        self.catalog['r21_psf'] = r21_psf
-        self.catalog['r22_psf'] = r22_psf
-        self.catalog['c1_psf'] = c1_psf
-        self.catalog['c2_psf'] = c2_psf 
-        self.catalog['c1'] = c1_gamma
-        self.catalog['c2'] = c2_gamma
-        # Placeholder for actual implementation
     
     def gridder(self, config):
         x_min, y_min = config["x_min"], config["y_min"]
@@ -147,21 +177,6 @@ class Calibrator:
         R21, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r21"],
                                         statistic=config["statistic"],
                                         bins=[x_bins, y_bins])
-        
-        # now for the PSF responses
-        R11_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r11_psf"],
-                                        statistic=config["statistic"],
-                                        bins=[x_bins, y_bins])
-        R22_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r22_psf"],
-                                        statistic=config["statistic"],
-                                        bins=[x_bins, y_bins])
-        R12_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r12_psf"],
-                                        statistic=config["statistic"],
-                                        bins=[x_bins, y_bins])
-        R21_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r21_psf"],
-                                        statistic=config["statistic"],
-                                        bins=[x_bins, y_bins])
-        
         # now for c
         C1, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["c1"],
                                         statistic=config["statistic"],
@@ -181,10 +196,6 @@ class Calibrator:
             "R22": R22,
             "R12": R12,
             "R21": R21,
-            "R11_psf": R11_psf,
-            "R22_psf": R22_psf,
-            "R12_psf": R12_psf,
-            "R21_psf": R21_psf,
             "C1": C1,
             "C2": C2,
             "sigma_e2": sigma_e2,
@@ -196,6 +207,28 @@ class Calibrator:
             'xbin_var': xbin_var,
             'ybin_var': ybin_var
         }
+                
+        # now for the PSF responses
+        if self.has_psf:
+            R11_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r11_psf"],
+                                            statistic=config["statistic"],
+                                            bins=[x_bins, y_bins])
+            R22_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r22_psf"],
+                                            statistic=config["statistic"],
+                                            bins=[x_bins, y_bins])
+            R12_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r12_psf"],
+                                            statistic=config["statistic"],
+                                            bins=[x_bins, y_bins])
+            R21_psf, _, _, _ = binned_statistic_2d(xbin_var, ybin_var, self.catalog["r21_psf"],
+                                            statistic=config["statistic"],
+                                            bins=[x_bins, y_bins])
+            res_dict.update({
+                "R11_psf": R11_psf,
+                "R22_psf": R22_psf,
+                "R12_psf": R12_psf,
+                "R21_psf": R21_psf
+            })
+
         if config['smoothing']:
             for key in res_dict:
                 if key not in ['x_bins', 'y_bins', 'x_p', 'y_p', 'xbin_var', 'ybin_var', 'sigma_e2', 'weight']:
@@ -210,7 +243,7 @@ class Calibrator:
         axes = axes.flatten()
         
         # first plot: response vs SNR
-        data_snr = process_catalog(self.catalog, bin_by='snr')
+        data_snr = process_catalog(self.catalog, bin_by='snr', has_psf=self.has_psf)
         res_dict = self.gridder(self.config)
         axes[0].errorbar(data_snr['bin_mean'], data_snr['r11_mean'], yerr=data_snr['r11_err'], 
                         fmt='o-', label='r11', capsize=4, markersize=5, color='blue', alpha=0.7)
@@ -229,20 +262,21 @@ class Calibrator:
         axes[0].legend(fontsize=self.config['tick_fontsize'])
         
         # second plot: response_psf vs SNR
-        axes[1].errorbar(data_snr['bin_mean'], data_snr['r11_psf_mean'], yerr=data_snr['r11_psf_err'], 
-                        fmt='o-', label='r11_psf', capsize=4, markersize=5, color='blue', alpha=0.7)
-        axes[1].errorbar(data_snr['bin_mean'], data_snr['r22_psf_mean'], yerr=data_snr['r22_psf_err'], 
-                    fmt='s-', label='r22_psf', capsize=4, markersize=5, color='red', alpha=0.7)
-        axes[1].errorbar(data_snr['bin_mean'], data_snr['r12_psf_mean'], yerr=data_snr['r12_psf_err'], 
-                    fmt     ='o--', label='r12_psf', capsize=4, markersize=5, color='green', alpha=0.7)
-        axes[1].errorbar(data_snr['bin_mean'], data_snr['r21_psf_mean'], yerr=data_snr['r21_psf_err'], 
-                    fmt ='s--', label='r21_psf', capsize=4, markersize=5, color='orange', alpha=0.7)
-        axes[1].axhline(0.0, color='grey', linestyle='--', alpha=0.7)
-        axes[1].set_xscale('log')
-        axes[1].set_xlabel('SNR', fontsize=self.config['xlabel_fontsize'])
-        axes[1].set_ylabel('Response PSF', fontsize=self.config['ylabel_fontsize'])
-        axes[1].set_title('Response PSF vs SNR', fontsize=self.config['xlabel_fontsize'] + 2)
-        axes[1].legend(fontsize=self.config['tick_fontsize'])
+        if self.has_psf:
+            axes[1].errorbar(data_snr['bin_mean'], data_snr['r11_psf_mean'], yerr=data_snr['r11_psf_err'], 
+                            fmt='o-', label='r11_psf', capsize=4, markersize=5, color='blue', alpha=0.7)
+            axes[1].errorbar(data_snr['bin_mean'], data_snr['r22_psf_mean'], yerr=data_snr['r22_psf_err'], 
+                        fmt='s-', label='r22_psf', capsize=4, markersize=5, color='red', alpha=0.7)
+            axes[1].errorbar(data_snr['bin_mean'], data_snr['r12_psf_mean'], yerr=data_snr['r12_psf_err'], 
+                        fmt     ='o--', label='r12_psf', capsize=4, markersize=5, color='green', alpha=0.7)
+            axes[1].errorbar(data_snr['bin_mean'], data_snr['r21_psf_mean'], yerr=data_snr['r21_psf_err'], 
+                        fmt ='s--', label='r21_psf', capsize=4, markersize=5, color='orange', alpha=0.7)
+            axes[1].axhline(0.0, color='grey', linestyle='--', alpha=0.7)
+            axes[1].set_xscale('log')
+            axes[1].set_xlabel('SNR', fontsize=self.config['xlabel_fontsize'])
+            axes[1].set_ylabel('Response PSF', fontsize=self.config['ylabel_fontsize'])
+            axes[1].set_title('Response PSF vs SNR', fontsize=self.config['xlabel_fontsize'] + 2)
+            axes[1].legend(fontsize=self.config['tick_fontsize'])
         
         # third plot: 2D histogram of counts
         pcm, X, Y = plot_counts(axes[2], res_dict['xbin_var'], res_dict['ybin_var'], res_dict['x_bins'], res_dict['y_bins'],
@@ -279,17 +313,18 @@ class Calibrator:
         add_colorbar(pcm, fig, axes[7], r"$\langle R_{22} \rangle$", self.config, logscale=False)
         optimize_ax(axes[7], self.config["x_min"], self.config["y_min"], res_dict["x_p"], res_dict["y_p"], self.config)
         
-        # ninth plot: 2D histogram of R11_psf
-        pcm = axes[8].pcolormesh(X, Y, res_dict['R11_psf'].T, cmap=self.config["cmap"],
-                         edgecolors="k", linewidth=self.config["linewidth"])
-        add_colorbar(pcm, fig, axes[8], r"$\langle R_{11}^{\rm PSF} \rangle$", self.config, logscale=False)
-        optimize_ax(axes[8], self.config["x_min"], self.config["y_min"], res_dict["x_p"], res_dict["y_p"], self.config)
-        
-        # tenth plot: 2D histogram of R22_psf
-        pcm = axes[9].pcolormesh(X, Y, res_dict['R22_psf'].T, cmap=self.config["cmap"],
-                         edgecolors="k", linewidth=self.config["linewidth"])
-        add_colorbar(pcm, fig, axes[9], r"$\langle R_{22}^{\rm PSF} \rangle$", self.config, logscale=False)
-        optimize_ax(axes[9], self.config["x_min"], self.config["y_min"], res_dict["x_p"], res_dict["y_p"], self.config)
+        if self.has_psf:
+            # ninth plot: 2D histogram of R11_psf
+            pcm = axes[8].pcolormesh(X, Y, res_dict['R11_psf'].T, cmap=self.config["cmap"],
+                            edgecolors="k", linewidth=self.config["linewidth"])
+            add_colorbar(pcm, fig, axes[8], r"$\langle R_{11}^{\rm PSF} \rangle$", self.config, logscale=False)
+            optimize_ax(axes[8], self.config["x_min"], self.config["y_min"], res_dict["x_p"], res_dict["y_p"], self.config)
+            
+            # tenth plot: 2D histogram of R22_psf
+            pcm = axes[9].pcolormesh(X, Y, res_dict['R22_psf'].T, cmap=self.config["cmap"],
+                            edgecolors="k", linewidth=self.config["linewidth"])
+            add_colorbar(pcm, fig, axes[9], r"$\langle R_{22}^{\rm PSF} \rangle$", self.config, logscale=False)
+            optimize_ax(axes[9], self.config["x_min"], self.config["y_min"], res_dict["x_p"], res_dict["y_p"], self.config)
         
         # eleventh plot: 2D histogram of C1
         pcm = axes[10].pcolormesh(X, Y, res_dict['C1'].T, cmap=self.config["cmap"],
@@ -318,14 +353,15 @@ class Calibrator:
                 cluster_redshift=cluster_redshift,
                 overwrite_calibration=True,
                 R_diagonal=R_diagonal,
-                PFS_response_correction=PFS_response_correction
+                PFS_response_correction=PFS_response_correction,
+                has_psf=self.has_psf
             )
         if not constant_Rpsf:
             R_PSF = None
         if not constant_C_gamma:
             c_gamma = None
         resdict = self.gridder(self.config)
-        calibrate_catalog(selected_catalog, resdict, R_S, mean_g1, mean_g2, suffix=f"{self.config['n_bins']}x{self.config['n_bins']}", psf_correction=PFS_response_correction, R_PSF=R_PSF, c_gamma=c_gamma)
+        calibrate_catalog(selected_catalog, resdict, R_S, mean_g1, mean_g2, suffix=f"{self.config['n_bins']}x{self.config['n_bins']}", psf_correction=(PFS_response_correction & self.has_psf), R_PSF=R_PSF, c_gamma=c_gamma)
         self.selected_catalog = selected_catalog
         
         
@@ -416,7 +452,7 @@ def assign_weights(catalog, x_bins, y_bins, weights):
     return w_obj
 
 
-def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correction=False, R_PSF=None, c_gamma=None):
+def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correction=False,R_PSF=None, c_gamma=None):
     """
     Assign gridded weights and calibrated ellipticities to a catalog.
 
@@ -448,10 +484,6 @@ def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correcti
     r11_col = assign_weights(catalog, x_bins, y_bins, grid['R11']) + R_S[0, 0]
     r22_col = assign_weights(catalog, x_bins, y_bins, grid['R22']) + R_S[1, 1]
     
-    r11_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R11_psf'])
-    r22_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R22_psf'])
-    
-    
     if c_gamma is not None:
         c1_col = c_gamma[0]
         c2_col = c_gamma[1]
@@ -463,6 +495,8 @@ def calibrate_catalog(catalog, grid, R_S, mean_g1, mean_g2, suffix, psf_correcti
     g2_noshear = catalog['g_noshear'][:, 1]  #- c2_col #- mean_g2
 
     if psf_correction:
+        r11_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R11_psf'])
+        r22_psf_col = assign_weights(catalog, x_bins, y_bins, grid['R22_psf'])
         if R_PSF is not None:
             g1_noshear = g1_noshear - R_PSF[0,0] * catalog['gpsf_noshear'][:,0]
             g2_noshear = g2_noshear - R_PSF[1,1] * catalog['gpsf_noshear'][:,1]

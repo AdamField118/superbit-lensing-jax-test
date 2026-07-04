@@ -12,6 +12,48 @@ import superbit_lensing.utils as utils
 
 import ipdb
 
+MINIMAL_TYPES = ['noshear', '1p', '1m', '2p', '2m']
+DILATE_TYPES = ['noshear', '1p', '1m', '2p', '2m', '1p_psf', '1m_psf', '2p_psf', '2m_psf']
+
+DEFAULT_MCAL_PARS = {'psf': 'dilate', 'mcal_shear': 0.01, 'types' : DILATE_TYPES}
+AZGAUSS_MCAL_PARS = {'psf': 'azgauss', 'mcal_shear': 0.01, 'types' : MINIMAL_TYPES}
+
+_SHEAR_STEPS = ('1', '2')
+
+def mcal_response(tab, mcal_shear, suffix=''):
+    """Per-object 2x2 mcal response, R[i, j, n] for component i, shear step j,
+    object n. Pass suffix='_psf' for the PSF response."""
+    R = np.array([
+        [(tab[f'g_{step}p{suffix}'][:, i] - tab[f'g_{step}m{suffix}'][:, i]) / (2. * mcal_shear)
+         for step in _SHEAR_STEPS]
+        for i in range(2)
+    ])
+    return R
+
+
+def mcal_additive_bias(tab, suffix=''):
+    """Per-object additive bias, c[i, n] for component i. The diagonal step
+    (i -> step i+1) is used, matching the standard mcal convention."""
+    c = np.array([
+        (tab[f'g_{step}p{suffix}'][:, i] + tab[f'g_{step}m{suffix}'][:, i]) / 2.
+        - tab['g_noshear'][:, i]
+        for i, step in enumerate(_SHEAR_STEPS)
+    ])
+    return c
+
+
+def mcal_selection_response(selections, mcal_shear):
+    """2x2 selection-bias response from the per-step selected catalogs,
+    R_S[i, j] for component i and shear step j."""
+    R = np.empty((2, 2))
+    for j, step in enumerate(_SHEAR_STEPS):
+        # The plus/minus selections contain different objects, so the mean of
+        # each must be taken before differencing.
+        gp = np.mean(selections[f'{step}p']['g_noshear'], axis=0)
+        gm = np.mean(selections[f'{step}m']['g_noshear'], axis=0)
+        R[:, j] = (gp - gm) / (2. * mcal_shear)
+    return R
+
 class Diagnostics(object):
     def __init__(self, name, config):
         self.name = name
@@ -718,6 +760,7 @@ def compute_R_S(
     overwrite_calibration=True,
     R_diagonal=True,
     PFS_response_correction=True,
+    has_psf=True,
     shape_noise=0.14
 ):
     """
@@ -850,26 +893,23 @@ def compute_R_S(
     # ------------------------------------------------------------------ #
     #  Shear response matrix  R_gamma
     # ------------------------------------------------------------------ #
-    r11_gamma = np.mean(noshear_selection['r11'])
-    r22_gamma = np.mean(noshear_selection['r22'])
-    r12_gamma = np.mean(noshear_selection['r12'])
-    r21_gamma = np.mean(noshear_selection['r21'])
 
-    r11_psf = np.mean(noshear_selection['r11_psf'])
-    r22_psf = np.mean(noshear_selection['r22_psf'])
-    r12_psf = np.mean(noshear_selection['r12_psf'])
-    r21_psf = np.mean(noshear_selection['r21_psf'])
+    # assuming delta_shear in ngmix_fit is 0.01
+    selections = {'1p': selection_1p, '1m': selection_1m,
+                    '2p': selection_2p, '2m': selection_2m}
 
-
-    R_gamma = np.array([
-        [r11_gamma, r12_gamma],
-        [r21_gamma, r22_gamma],
-    ])
+    # Mean responses (mean over objects of the per-object response)
+    R_gamma = np.mean(mcal_response(noshear_selection, mcal_shear), axis=2)
+    R_S = mcal_selection_response(selections, mcal_shear)
+    c_gamma = np.mean(mcal_additive_bias(noshear_selection), axis=1)
     
-    R_PSF = np.array([
-        [r11_psf, r12_psf],
-        [r21_psf, r22_psf],
-    ])
+    # Compute the final response matrix
+    R = R_gamma + R_S
+    R_inv = np.linalg.inv(R)
+    R_PSF = None
+    if has_psf:
+        R_PSF = np.mean(mcal_response(noshear_selection, mcal_shear, suffix='_psf'), axis=2)
+        c_psf = np.mean(mcal_additive_bias(noshear_selection, suffix='_psf'), axis=1)
 
     # ------------------------------------------------------------------ #
     #  Selection bias response matrix  R_S  (and its uncertainty)
@@ -877,15 +917,6 @@ def compute_R_S(
     def _mean_err(x):
         """Standard error on the mean."""
         return np.std(x, ddof=1) / np.sqrt(len(x))
-
-    r11_S = (np.mean(selection_1p['g_noshear'][:, 0])
-             - np.mean(selection_1m['g_noshear'][:, 0])) / (2.0 * mcal_shear)
-    r22_S = (np.mean(selection_2p['g_noshear'][:, 1])
-             - np.mean(selection_2m['g_noshear'][:, 1])) / (2.0 * mcal_shear)
-    r12_S = (np.mean(selection_2p['g_noshear'][:, 0])
-             - np.mean(selection_2m['g_noshear'][:, 0])) / (2.0 * mcal_shear)
-    r21_S = (np.mean(selection_1p['g_noshear'][:, 1])
-             - np.mean(selection_1m['g_noshear'][:, 1])) / (2.0 * mcal_shear)
 
     err_r11_S = np.sqrt(
         _mean_err(selection_1p['g_noshear'][:, 0])**2
@@ -904,43 +935,10 @@ def compute_R_S(
         + _mean_err(selection_1m['g_noshear'][:, 1])**2
     ) / (2.0 * mcal_shear)
 
-    R_S = np.array([
-        [r11_S, r12_S],
-        [r21_S, r22_S],
-    ])
     err_R_S = np.array([
         [err_r11_S, err_r12_S],
         [err_r21_S, err_r22_S],
     ])
-
-    # ------------------------------------------------------------------ #
-    #  PSF and gamma additive bias corrections
-    # ------------------------------------------------------------------ #
-    c1_psf = np.mean(
-        (noshear_selection['g_1p_psf'][:, 0] + noshear_selection['g_1m_psf'][:, 0]) / 2.0
-        - noshear_selection['g_noshear'][:, 0]
-    )
-    c2_psf = np.mean(
-        (noshear_selection['g_2p_psf'][:, 1] + noshear_selection['g_2m_psf'][:, 1]) / 2.0
-        - noshear_selection['g_noshear'][:, 1]
-    )
-    c1_gamma = np.mean(
-        (noshear_selection['g_1p'][:, 0] + noshear_selection['g_1m'][:, 0]) / 2.0
-        - noshear_selection['g_noshear'][:, 0]
-    )
-    c2_gamma = np.mean(
-        (noshear_selection['g_2p'][:, 1] + noshear_selection['g_2m'][:, 1]) / 2.0
-        - noshear_selection['g_noshear'][:, 1]
-    )
-
-    # ------------------------------------------------------------------ #
-    #  Total response and correction vectors
-    # ------------------------------------------------------------------ #
-    R = R_gamma + R_S
-    R_inv = np.linalg.inv(R)
-
-    c_psf = np.array([c1_psf, c2_psf])
-    c_gamma = np.array([c1_gamma, c2_gamma])
 
     # ------------------------------------------------------------------ #
     #  Diagnostics
@@ -951,8 +949,8 @@ def compute_R_S(
     print(R_S)
     print("\nTotal Response Matrix (R):")
     print(R)
-    print("\nSelection Response Uncertainty:")
-    print(err_R_S)
+    # print("\nSelection Response Uncertainty:")
+    # print(err_R_S)
     # print("\nPSF Correction Vector (c_psf):")
     # print(c_psf)
     print("\nGamma Correction Vector (c_gamma):")
@@ -1015,8 +1013,7 @@ def compute_R_S(
     # Subtract additive bias, then divide by response
     g_biased = selected['g_noshear'] - c_gamma  # (n, 2)
     
-    if PFS_response_correction:
-        
+    if PFS_response_correction & has_psf:
         if R_diagonal:
             g_psf_correction = np.empty_like(g_biased)  # FIX: was np.array_like (doesn't exist)
             g_psf_correction[:, 0] = g1psf_noshear * R_PSF[0, 0]
@@ -1042,14 +1039,14 @@ def compute_R_S(
     selected['g1_uncl'] = g_biased[:, 0]
     selected['g2_uncl'] = g_biased[:, 1]
     selected['g_cov_Rinv'] = corrected_cov
-    selected['R11_S'] = r11_S
-    selected['R22_S'] = r22_S
+    selected['R11_S'] = R_S[0, 0]
+    selected['R22_S'] = R_S[1, 1]
     selected['weight'] = weight
 
     return selected, R_S, c_gamma, mean_g1, mean_g2, R_PSF
 
 
-def process_catalog(cat, bin_by='snr', n_bins = 25):
+def process_catalog(cat, bin_by='snr', n_bins = 25, has_psf=True):
     valid = np.isfinite(cat['r11']) & np.isfinite(cat['r22']) & np.isfinite(cat['r12']) & np.isfinite(cat['r21'])
     cat = cat[valid]
     
@@ -1066,11 +1063,6 @@ def process_catalog(cat, bin_by='snr', n_bins = 25):
     r21 = cat['r21']
     r22 = cat['r22']
     
-    r11_psf = cat['r11_psf']
-    r12_psf = cat['r12_psf']
-    r21_psf = cat['r21_psf']
-    r22_psf = cat['r22_psf']
-    
     # Method 1: Equal number of objects per bin (quantile-based)
     percentiles = np.linspace(0, 100, n_bins + 1)
     bin_edges = np.percentile(bin_var, percentiles)
@@ -1083,12 +1075,8 @@ def process_catalog(cat, bin_by='snr', n_bins = 25):
     r12_mean, r12_err = [], []
     r21_mean, r21_err = [], []
     r22_mean, r22_err = [], []
-    r11_psf_mean, r11_psf_err = [], []
-    r12_psf_mean, r12_psf_err = [], []
-    r21_psf_mean, r21_psf_err = [], []
-    r22_psf_mean, r22_psf_err = [], []
     bin_mean = []
-    
+
     for i in range(1, len(bin_edges)):
         mask = bin_indices == i
         n_points = np.sum(mask)
@@ -1099,10 +1087,6 @@ def process_catalog(cat, bin_by='snr', n_bins = 25):
             r12_mean.append(np.median(r12[mask]))
             r21_mean.append(np.median(r21[mask]))
             r22_mean.append(np.median(r22[mask]))
-            r11_psf_mean.append(np.median(r11_psf[mask]))
-            r12_psf_mean.append(np.median(r12_psf[mask]))
-            r21_psf_mean.append(np.median(r21_psf[mask]))
-            r22_psf_mean.append(np.median(r22_psf[mask]))
             bin_mean.append(np.median(bin_var[mask]))
             
             # Standard error = std / sqrt(n)
@@ -1110,13 +1094,8 @@ def process_catalog(cat, bin_by='snr', n_bins = 25):
             r12_err.append(np.std(r12[mask]) / np.sqrt(n_points))
             r21_err.append(np.std(r21[mask]) / np.sqrt(n_points))
             r22_err.append(np.std(r22[mask]) / np.sqrt(n_points))
-            r11_psf_err.append(np.std(r11_psf[mask]) / np.sqrt(n_points))
-            r12_psf_err.append(np.std(r12_psf[mask]) / np.sqrt(n_points))
-            r21_psf_err.append(np.std(r21_psf[mask]) / np.sqrt(n_points))
-            r22_psf_err.append(np.std(r22_psf[mask]) / np.sqrt(n_points))
-            
-    # Convert to arrays
-    return {'valid': valid,
+           
+    res_dict = {'valid': valid,
         'r11_mean': np.array(r11_mean),
         'r12_mean': np.array(r12_mean),
         'r21_mean': np.array(r21_mean),
@@ -1125,13 +1104,47 @@ def process_catalog(cat, bin_by='snr', n_bins = 25):
         'r12_err': np.array(r12_err),
         'r21_err': np.array(r21_err),
         'r22_err': np.array(r22_err),
-        'r11_psf_mean': np.array(r11_psf_mean),
-        'r12_psf_mean': np.array(r12_psf_mean),
-        'r21_psf_mean': np.array(r21_psf_mean),
-        'r22_psf_mean': np.array(r22_psf_mean),
-        'r11_psf_err': np.array(r11_psf_err),
-        'r12_psf_err': np.array(r12_psf_err),
-        'r21_psf_err': np.array(r21_psf_err),
-        'r22_psf_err': np.array(r22_psf_err),
         'bin_mean': np.array(bin_mean)
     }
+    
+    if has_psf:
+        r11_psf = cat['r11_psf']
+        r12_psf = cat['r12_psf']
+        r21_psf = cat['r21_psf']
+        r22_psf = cat['r22_psf']
+        r11_psf_mean, r11_psf_err = [], []
+        r12_psf_mean, r12_psf_err = [], []
+        r21_psf_mean, r21_psf_err = [], []
+        r22_psf_mean, r22_psf_err = [], []
+        
+        
+        for i in range(1, len(bin_edges)):
+            mask = bin_indices == i
+            n_points = np.sum(mask)
+            
+            if n_points > 0:
+                r11_psf_mean.append(np.median(r11_psf[mask]))
+                r12_psf_mean.append(np.median(r12_psf[mask]))
+                r21_psf_mean.append(np.median(r21_psf[mask]))
+                r22_psf_mean.append(np.median(r22_psf[mask]))
+                
+                r11_psf_err.append(np.std(r11_psf[mask]) / np.sqrt(n_points))
+                r12_psf_err.append(np.std(r12_psf[mask]) / np.sqrt(n_points))
+                r21_psf_err.append(np.std(r21_psf[mask]) / np.sqrt(n_points))
+                r22_psf_err.append(np.std(r22_psf[mask]) / np.sqrt(n_points))
+    
+        res_dict.update({
+            'r11_psf_mean': np.array(r11_psf_mean),
+            'r12_psf_mean': np.array(r12_psf_mean),
+            'r21_psf_mean': np.array(r21_psf_mean),
+            'r22_psf_mean': np.array(r22_psf_mean),
+            'r11_psf_err': np.array(r11_psf_err),
+            'r12_psf_err': np.array(r12_psf_err),
+            'r21_psf_err': np.array(r21_psf_err),
+            'r22_psf_err': np.array(r22_psf_err),
+        })
+    
+    
+            
+    # Convert to arrays
+    return res_dict

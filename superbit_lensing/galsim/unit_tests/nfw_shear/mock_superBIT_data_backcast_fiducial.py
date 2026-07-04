@@ -41,7 +41,7 @@ from mpi_helper import MPIHelper
 from multiprocessing import Pool
 
 import superbit_lensing.utils as utils
-from scipy.special import gamma
+from scipy.special import gamma, gammaincinv
 
 
 
@@ -307,21 +307,14 @@ def make_a_galaxy(ud, wcs, affine, cosmos_cat, nfw, psf, sbparams, logprint, exp
     if q > 1.0:
         q = 1 / q
 
-    # Sersic class requires index n >= 0.3
-    if (n < 0.3):
-        n = 0.3
+    n = np.clip(n, 0.3, 6.2)  # Sersic index bounds(https://galsim-developers.github.io/GalSim/_build/html/gal.html#sersic-profile)
 
-    # gal = galsim.Sersic(n = n,
-    #                     flux = gal_flux,
-    #                     half_light_radius = half_light_radius)
-    # gal_flux = 12258.97 # Equivalent to mag=20
-    # half_light_radius = 0.5 # arcsec
     min_hlr = 1e-6
     half_light_radius = half_light_radius if (np.isfinite(half_light_radius) and half_light_radius > 0) else min_hlr
 
     # ====== Added part for converting sersic hlr to Exp hlr ========
     def b_n(n):
-        return 2*n - 1/3 + 4/(405*n) + 46/(25515*n**2)
+        return gammaincinv(2*n, 0.5)
 
     def F(n):
         bn = b_n(n)
