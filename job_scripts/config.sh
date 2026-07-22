@@ -7,8 +7,8 @@ export cluster_redshift="0.296"
 export detection_band="b"
 
 # Define directories
-export DATADIR="/n23data1/saha/data"
-export CODEDIR="/home/saysaha/codes/superbit-lensing"
+export DATADIR="/home/adfield/weak_lensing/superbit-lensing-jax-test/data"
+export CODEDIR="/home/adfield/weak_lensing/superbit-lensing-jax-test"
 export OUTDIR="${DATADIR}/${cluster_name}/${band_name}/out"
 
 # Define ngmix parameters

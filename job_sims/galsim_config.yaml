@@ -45,13 +45,13 @@ omega_lam:          0.6888        # Omega lambda for the background cosmology []
 # Run parameters
 # --------------
 # Define some paths and filenames
-cosmosdir:         '/projects/mccleary_group/superbit/galsim_data/galsim_cosmos_catalogs' # Path to COSMOS data directory
-datadir:           '/projects/mccleary_group/superbit/galsim_data' # Path to repo/galsim data directory
+cosmosdir:         '/home/adfield/weak_lensing/superbit-lensing-jax-test/simulated_data/sim_utils/galsim_data/galsim_cosmos_catalogs' # Path to COSMOS data directory
+datadir:           '/home/adfield/weak_lensing/superbit-lensing-jax-test/simulated_data/sim_utils/galsim_data' # Path to repo/galsim data directory
 cat_file_name:     'cosmos15_superbit2023_phot_shapes_with_sigma.csv' #'cosmos2015_cam2021_filt2021.csv' catalog file name for COSMOS (in cosmosdir)
 cluster_cat_name:  'real_galaxy_catalog_23.5_example.fits' # path to cluster catalog
 star_cat_name:      'APRA_cluster_GAIA_starcats/GAIAstars_1E0657.csv' #'master_gaiastar_cat.fits' # File containing GAIA star fluxes
 outdir:            './forecasting/sim_test' # directory where output images and truth catalogs are saved
-emp_psf_path:      '/projects/mccleary_group/superbit/emp_psfs/emp_psfs_best/psfex-output'
+emp_psf_path:      '/home/adfield/weak_lensing/superbit-lensing-jax-test/simulated_data/sim_utils/emp_psfs/emp_psfs_best/psfex-output'
 
 
 # Misc parameters

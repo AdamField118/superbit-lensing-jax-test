@@ -10,8 +10,8 @@ START_SIM=${4:-1} # Default starting simulation number
 START_SEED=${5:-42} # Default starting seed
 
 # Define directories
-DATADIR="/scratch/sa.saha/simulated_data"
-CODEDIR="/projects/mccleary_group/saha/codes/superbit-lensing"
+DATADIR="/home/adfield/weak_lensing/superbit-lensing-jax-test/simulated_data"
+CODEDIR="/home/adfield/weak_lensing/superbit-lensing-jax-test"
 
 echo "Starting simulation batch: $RUN_NAME"
 echo "Will run $NUM_SIMS simulations starting from sim$START_SIM"
